@@ -234,7 +234,7 @@ def main(args):
         f.write(f"  Speed: {standard_results['steps_per_sec']:.2f} steps/sec\n")
         f.write(f"  Memory: {standard_results['max_memory_mb']:.0f} MB\n")
         f.write(f"  Final Loss: {standard_results['final_loss']:.4f}\n\n")
-        f.write(f"DiT DH (body=1152 d28, head=2048 d2):\n")
+        f.write(f"DiT DH (body=768 d28, head=1152 d2):\n")
         f.write(f"  Parameters: {dh_params:,}\n")
         f.write(f"  Speed: {dh_results['steps_per_sec']:.2f} steps/sec\n")
         f.write(f"  Memory: {dh_results['max_memory_mb']:.0f} MB\n")

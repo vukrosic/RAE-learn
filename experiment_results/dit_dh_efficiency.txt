@@ -1,0 +1,20 @@
+DiT DH Efficiency Comparison
+==================================================
+
+Standard DiT (width=1152, depth=28):
+  Parameters: 676,953,216
+  Speed: 7.04 steps/sec
+  Memory: 15097 MB
+  Final Loss: 1.1579
+
+DiT DH (body=768 d28, head=1152 d2):
+  Parameters: 353,142,400
+  Speed: 9.19 steps/sec
+  Memory: 8786 MB
+  Final Loss: 1.1496
+
+Improvements:
+  Parameters: +47.8%
+  Speed: +30.4%
+  Memory: +41.8%
+  Loss difference: -0.0084
