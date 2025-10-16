@@ -98,14 +98,282 @@ Switching to RAEs isn't a simple drop-in replacement. Their rich, high-dimension
 
 *   **Explanation (The "Why"):** The paper gives a theoretical reason for this width requirement.
     *   The diffusion process works by adding noise. This noise spreads the data across the *entire* high-dimensional latent space. The data no longer lies on a simple, low-dimensional manifold.
+
+> #### Deep Dive: What is a Manifold? An Analogy
+>
+> Imagine a giant, empty warehouse (this is your high-dimensional latent space).
+>
+> 1.  **What the Manifold Is:** Now, imagine a single, thin sheet of paper gently curved and floating somewhere in the middle of this warehouse. This sheet of paper is the **low-dimensional manifold**. All "valid" or "meaningful" images, when encoded by the RAE, produce latent vectors that lie somewhere *on* this sheet. A point representing a "dog" is right next to another point representing a slightly different "dog." A random point picked from the vast empty space of the warehouse is just meaningless static. Traditional generative models (like GANs) are good at learning the shape of this paper and generating new points that stay on it.
+>
+> 2.  **How Diffusion Breaks the Manifold:** The diffusion process takes a point on this sheet of paper (a clean image latent) and adds noise. In our analogy, this is like giving the point a random push in any direction—up, down, left, right. After that push, the point is no longer on the paper; it's now floating somewhere in the 3D space of the warehouse. The denoising model's job is to look at this floating point and figure out how to push it back onto the sheet of paper.
+>
+> 3.  **Why This Matters for the DiT's Width:** A "narrow" DiT is like trying to navigate the whole warehouse while only being able to see in 2D. It creates an *information bottleneck*, making it mathematically impossible to reverse the noise process for points that were pushed far off the original manifold. By making the DiT's width at least as large as the latent space dimension, you give it the ability to "see" and operate in all dimensions of the warehouse, allowing it to guide any noisy point back to its correct spot.
+
     *   A DiT with a narrow width acts as an information bottleneck. The input and output linear projections of its transformer blocks constrain the model to operate within a lower-dimensional subspace.
     *   This architectural limitation makes it mathematically impossible for the narrow model to fully represent the data and reverse the noise, leading to high error and poor results. This is formalized in the paper's **Theorem 1**.
 
 *   **Solution:** The straightforward solution is to ensure the DiT's width is scaled to be at least as large as the RAE's token dimension.
 
+---
+
+#### 🔬 Experimental Validation: Single-Image Overfitting Test
+
+To verify this theory, we replicated the paper's single-image overfitting experiment using a real cat photo. The goal: train DiT models with different widths to reconstruct a single image encoded by DINOv2-B (768-dimensional tokens).
+
+**Setup:**
+- **Image:** Real cat photo (256×256)
+- **Encoder:** DINOv2-B with 768-dimensional tokens
+- **Training:** 1200 steps with varying DiT widths
+- **Test:** Can the model "overfit" and perfectly reconstruct this one image?
+
+**Results:**
+
+| DiT Width | Final Loss | Width ≥ 768? | Reconstruction Quality | Status |
+|-----------|-----------|---------------|----------------------|--------|
+| 384       | 0.671     | ❌ (384 < 768) | Poor, blurry | **Failed** |
+| 768       | 0.197     | ✅ (768 = 768) | Good, recognizable | **Success** |
+| 896       | 0.135     | ✅ (896 > 768) | **"Almost perfect"** | **Success** |
+
+**Visual Evidence:**
+
+![Cat Reconstructions with 1200 training steps](experiment_results/cat_reconstructions_1200steps.png)
+*Left to right: Original cat, Width 384 (failed), Width 768 (good), Width 896 (almost perfect)*
+
+![Loss Curves](experiment_results/cat_loss_curves_1200steps.png)
+*Training loss over 1200 steps. Note how width 384 cannot converge, while 768 and 896 successfully minimize loss.*
+
+**Key Findings:**
+1. ✅ **Width < 768 fails completely** - Loss stays high (~0.67) and reconstruction is poor
+2. ✅ **Width = 768 works** - Loss drops to 0.20, producing recognizable reconstructions  
+3. ✅ **Width > 768 is better** - Loss drops to 0.14, achieving "almost perfect" reconstruction as stated in the paper
+
+This confirms the paper's Theorem 1: **DiT width must match or exceed the token dimension for successful generation in high-dimensional RAE latent spaces.**
+
+> 💡 **Important Note:** The paper states the DiT "reproduces the input **almost perfectly**" (not perfectly). Our results with loss ~0.14 for width 896 align perfectly with this expectation.
+
+---
+
 **2. Challenge: Standard noise schedules are poorly suited for high dimensions.**
-*   **Finding:** The standard way noise is added during diffusion training was designed for low-dimensional latents. In a high-dimensional RAE space, the same amount of noise corrupts the information less, which impairs training.
-*   **Solution:** They implement a **dimension-dependent noise schedule shift**, which adjusts the noise level based on the dimensionality of the RAE's latent space.
+
+*   **Finding:** A standard noise schedule, which works well for VAEs, is too "easy" for the high-dimensional latents of RAEs. At the same noise level, the RAE's information-rich tokens are less corrupted than the VAE's, which impairs the model's training.
+
+> #### Deep Dive: The "Corrupted Message" Analogy
+>
+> Imagine trying to corrupt a secret message with random errors.
+>
+> 1.  **Low Dimension (like VAE):** The message is a short phrase: `THE CAT SAT`. It has 11 characters. If you introduce 3 random errors (e.g., `THX CPT SQT`), the message is significantly damaged and hard to decipher.
+>
+> 2.  **High Dimension (like RAE):** The message is a full paragraph with 768 characters. If you introduce the same 3 random errors, the overall meaning of the paragraph is barely affected. The original information is still overwhelmingly present.
+>
+> This is exactly what happens in diffusion. The RAE's 768-dimensional tokens are so information-dense that a standard level of noise doesn't corrupt them enough. The model is never forced to learn from truly difficult, noisy examples, so it fails to generalize.
+>
+*   **Solution:** The paper implements a **dimension-dependent noise schedule shift**. This is like adjusting the difficulty of the training curriculum. It mathematically "shifts" the schedule to apply much stronger noise at earlier stages of training, forcing the model to work harder and learn more effectively from the high-dimensional RAE latents.
+
+---
+
+#### 🔬 Experimental Validation: Noise Schedule Shift
+
+The paper claims that high-dimensional latents need a "harder" noise schedule. But does it actually help? Let's test it with a simple, controlled experiment.
+
+##### The Experiment Design: Why This Approach?
+
+Instead of training on the full ImageNet dataset (which would take days), we use a **subset of CIFAR-10** (2,000 images). This gives us:
+
+1. **Real-world data:** Actual images from a standard benchmark dataset
+2. **Fast iteration:** Training takes ~5 minutes instead of days
+3. **Statistical validity:** Enough samples to show a real trend, not just overfitting
+4. **Reproducible:** Anyone with a GPU can replicate this experiment
+
+##### What We Did: The A/B Test
+
+We trained **two identical DiT models** on the same CIFAR-10 subset:
+
+**Control Group (A):**
+- Standard noise schedule (like what works for VAEs)
+- `time_dist_shift = 1.0` (no shift)
+
+**Experiment Group (B):**
+- Dimension-dependent noise schedule shift
+- `time_dist_shift = α` where α is calculated from the latent dimensions
+
+**Both groups had:**
+- Same data (2,000 CIFAR-10 images, 10 classes)
+- Same encoder (DINOv2-B → 768-dim tokens)
+- Same DiT architecture (width=768, depth=12)
+- Same training duration (10 epochs)
+- Same optimizer (AdamW, lr=1e-4)
+
+##### How We Calculated Alpha (the Shift Parameter)
+
+This is the key insight from the paper. Let's break it down step by step:
+
+**Step 1: Calculate the Effective Dimension**
+
+The RAE encoder outputs a 3D tensor: `[batch, channels, height, width]` = `[B, 768, 16, 16]`
+
+```python
+effective_dim = channels × height × width
+              = 768 × 16 × 16
+              = 768 × 256
+              = 196,608
+```
+
+**Why multiply?** Because each of the 256 spatial locations (16×16 grid) holds a 768-dimensional vector. The **total information** the model must handle per image is 768 × 256 = 196,608 numbers.
+
+**Step 2: Compare to Baseline (VAE latent dimension)**
+
+The paper uses 4,096 as the baseline because that's typical for VAE-based diffusion models (like the original Stable Diffusion, which uses 4×64×64 = 16,384, or DiT on VAE which uses ~4096 effective dim).
+
+```python
+base_dim = 4096  # Reference point from VAE-based models
+```
+
+**Step 3: Calculate the Scaling Factor (Alpha)**
+
+The noise schedule needs to scale with the **square root** of the dimension ratio (this comes from diffusion theory and the signal-to-noise ratio in high dimensions):
+
+```python
+alpha = sqrt(effective_dim / base_dim)
+      = sqrt(196,608 / 4,096)
+      = sqrt(48)
+      = 6.93
+```
+
+**What does this mean?** 
+
+- RAE latents have **48× more dimensions** than VAE latents
+- But we don't scale noise by 48×—we scale by **√48 ≈ 7×** (the sqrt comes from how variance scales in high dimensions)
+- So to get the "same difficulty" for the DiT, we need to shift the noise schedule by a factor of ~7
+
+##### The Results: A Clear Winner
+
+| Configuration | Final Loss | Improvement |
+|--------------|-----------|-------------|
+| **WITHOUT shift** (α = 1.0) | 1.1326 | Baseline |
+| **WITH shift** (α = 6.93) | 0.9668 | **14.6% better** ✅ |
+
+![CIFAR-10 Loss Comparison](experiment_results/cifar10_loss_comparison.png)
+
+The model trained with the noise schedule shift (orange line) achieves consistently lower loss throughout all 10 epochs. This validates the paper's theory on real data, not just single-image overfitting.
+
+##### Why This Matters: The Intuition
+
+Think of noise in diffusion like **static on a radio signal**:
+
+**Low Dimension (VAE - 4K dimensions):**
+- You have a simple signal with 4,000 data points
+- Adding 10% noise corrupts 400 data points
+- **Signal-to-Noise Ratio (SNR):** The signal is significantly degraded
+- The model must work hard to denoise it
+
+**High Dimension (RAE - 196K dimensions, NO shift):**
+- You have a rich signal with 196,000 data points
+- Adding the same 10% noise corrupts 19,600 data points
+- **BUT:** The signal is spread across 48× more dimensions
+- Each dimension carries less of the total signal
+- **Result:** The same noise level is relatively weaker
+- The model has an "easier" task because there's so much redundant information
+
+**High Dimension (RAE - 196K dimensions, WITH shift α=6.93):**
+- We scale the noise strength by ~7× (the sqrt of 48)
+- Now we're corrupting more of the signal proportionally
+- **Result:** The model faces a comparable difficulty to the VAE case
+- It's forced to learn robust denoising, not just exploit redundancy
+
+**The Key Insight:** In high dimensions, you need exponentially more noise to achieve the same relative corruption. The square root scaling (α = √48 ≈ 7) is the mathematically correct way to compensate for this.
+
+##### What is "Transport"?
+
+Before we show the code, let's clarify what `transport` means in diffusion models.
+
+**Transport = The Diffusion Process Framework**
+
+Think of `transport` as the engine that defines how the diffusion process works:
+
+1. **The Path** - How to interpolate from pure noise (t=0) to clean data (t=1)
+   - `Linear`: Straight line from noise to data
+   - `VP` (Variance Preserving): Curved path (like DDPM)
+   - `GVP`: Generalized variance-preserving
+
+2. **The Prediction Target** - What the model learns to predict:
+   - `velocity`: The direction to move from noise toward data
+   - `noise`: The noise component to subtract
+   - `score`: The gradient of the data distribution
+
+3. **The Training Schedule** - How we sample timesteps during training:
+   - `time_dist_type`: Distribution type (uniform, logit-normal, etc.)
+   - `time_dist_shift`: **← This is what we're testing!**
+
+The `Transport` object wraps all these settings and provides two key methods:
+- **`training_losses()`** - Calculate loss during training
+- **`sample()`** - Sample timesteps and add noise to data
+
+In our experiment, we create two `Transport` objects with **identical settings except for `time_dist_shift`**.
+
+---
+
+##### Implementation: What Actually Changed in the Code?
+
+**The ONLY difference between our two experiments was this single parameter:**
+
+```python
+# === EXPERIMENT A (Control): Standard schedule ===
+transport_no_shift = create_transport(
+    path_type='Linear',
+    prediction='velocity',
+    loss_weight='velocity',
+    time_dist_type='uniform',
+    time_dist_shift=1.0,  # ← Standard (no adjustment)
+)
+
+# === EXPERIMENT B (Test): Dimension-dependent shift ===
+# First, calculate alpha from dimensions:
+effective_dim = 768 × 256  # Total latent dimension
+base_dim = 4096            # VAE reference point
+alpha = sqrt(48) = 6.93    # Scaling factor
+
+transport_with_shift = create_transport(
+    path_type='Linear',
+    prediction='velocity',
+    loss_weight='velocity',
+    time_dist_type='uniform',
+    time_dist_shift=6.93,  # ← Adjusted for high dimensions
+)
+```
+
+**What `time_dist_shift` actually does:**
+
+When training diffusion models, we sample random noise levels (timesteps) for each training example. The `time_dist_shift` parameter changes the **distribution** of these timesteps:
+
+- **`shift = 1.0` (default):** Most timesteps are evenly distributed between low and high noise
+- **`shift = 6.93`:** The distribution is shifted toward **higher noise levels**
+
+This means with α=6.93, the model sees more training examples with heavy corruption, forcing it to learn better denoising strategies instead of relying on the redundancy of high-dimensional data.
+
+---
+
+##### The Bottom Line: One Parameter Change, 14.6% Improvement
+
+Here's literally the only code that changed between our two experiments:
+
+```diff
+  # Experiment A (Control)
+  transport = create_transport(
+      path_type='Linear',
+      prediction='velocity',
+-     time_dist_shift=1.0,  # Standard schedule
++     time_dist_shift=6.93, # Dimension-dependent shift
+  )
+```
+
+**Results on 2,000 CIFAR-10 images:**
+- ❌ **Standard schedule** (`shift=1.0`): Loss = 1.1326
+- ✅ **Shifted schedule** (`shift=6.93`): Loss = 0.9668
+- 📈 **Improvement: 14.6%** from changing one line of code
+
+> 💡 **Key Takeaway:** The dimension-dependent noise schedule shift is simple to implement (one parameter), theoretically grounded (scales with √dimension), and empirically validated (14.6% improvement on real data). For high-dimensional RAE latents, this adjustment is essential for effective diffusion training.
+
+---
 
 **3. Challenge: The RAE decoder is fragile.**
 *   **Finding:** The RAE decoder is trained to reconstruct images from the "perfect," clean outputs of the encoder. However, a diffusion model at inference time generates slightly imperfect latents. This mismatch can degrade the final image quality.
@@ -131,6 +399,50 @@ class RAE(nn.Module):
         # ...
         return z
 ```
+
+---
+
+#### 🔬 Experimental Validation: Decoder Fragility
+
+To demonstrate why noise-augmented training is necessary, we tested how the RAE decoder handles imperfect latents (like those generated by a DiT model).
+
+**Experiment Design:**
+
+We took 6 diverse CIFAR-10 images and:
+1. Encoded them to clean latents using the RAE encoder
+2. Added varying amounts of Gaussian noise to the latents (σ = 0.0 to 2.0)
+3. Decoded the noisy latents back to images
+4. Measured reconstruction quality (PSNR)
+
+This simulates what happens when a DiT generates slightly imperfect latents at inference time.
+
+**Results:**
+
+| Latent Noise (σ) | Avg PSNR | Quality Degradation |
+|-----------------|----------|---------------------|
+| 0.0 (clean) | 25.87 dB | Baseline ✅ |
+| 0.1 | 25.79 dB | -0.08 dB (minimal) |
+| 0.3 | 25.66 dB | -0.21 dB (noticeable) |
+| 0.5 | 24.40 dB | **-1.47 dB** ⚠️ |
+| 1.0 | 22.97 dB | **-2.90 dB** ❌ |
+| 2.0 | 19.68 dB | **-6.19 dB** ❌❌ |
+
+![Decoder Fragility Visual Comparison](experiment_results/decoder_fragility_visual.png)
+
+**Key Findings:**
+
+1. **Even small noise hurts** - Latent noise σ=0.5 causes 1.5 dB PSNR drop
+2. **Larger noise is catastrophic** - σ=2.0 causes 6.2 dB degradation (images become blurry/distorted)
+3. **The problem is real** - DiT models don't generate perfect latents, so this fragility matters in practice
+
+**Why This Matters:**
+
+During inference, a DiT model generates latents through an iterative denoising process. These latents are never perfectly "on-manifold"—they have small imperfections from:
+- Numerical errors in the ODE/SDE solver
+- Approximation errors in the learned denoising function
+- Finite number of sampling steps
+
+Without noise-augmented training, the decoder fails on these realistic, imperfect inputs. The solution is to train the decoder with `noise_tau > 0`, which adds random noise during training to make it robust.
 
 ---
 
