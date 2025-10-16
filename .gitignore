@@ -1,15 +1,69 @@
-__pycache__
-wandb
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
 
-.DS_store
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Experiment tracking
+wandb/
+.wandb/
+
+# Training outputs
 /samples/
 /results/
-pretrained_models
-
-/models/
-__pycache__/
-*.pth
-.cache/
+/test_results/
+/ablation_results/
 /checkpoints/
-upload_to_hf.py
+pretrained_models/
+
+# Model files
+/models/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+.cache/
+.caches/
+
+# Logs
+*.log
+logs/
+
+# Test data (generated for experiments)
+/test_data/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Generated images
 /*.png
+/*.jpg
+/*.jpeg
+
+# Custom scripts
+upload_to_hf.py
