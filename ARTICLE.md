@@ -88,9 +88,20 @@ rae.decoder.requires_grad_(True)
 
 Switching to RAEs isn't a simple drop-in replacement. Their rich, high-dimensional latent spaces create new problems for Diffusion Transformers, which were designed for the VAE's small, simple space. The paper identifies and solves three main issues:
 
-**1. Challenge: The DiT struggles with high-dimensional tokens.**
-*   **Finding:** The authors discovered that for a DiT to effectively model the data, its internal *width* (hidden dimension) must be **at least as large as the dimension of the RAE's tokens**. A model that is too "narrow" simply fails to learn.
-*   **Solution:** Use DiT models that are wide enough to match the RAE's token dimension.
+**1. Challenge: A standard DiT struggles with RAE's high-dimensional tokens.**
+
+*   **Observation:** The authors first found that a standard DiT, which works well with low-dimensional VAE latents, fails to train properly on the high-dimensional latents from an RAE. A small DiT fails completely, and even a large one underperforms significantly.
+
+*   **Experiment (The "How"):** To understand why, they designed a simple test: can a DiT learn to perfectly reconstruct a *single* image encoded by RAE?
+    *   They found that the DiT could only succeed if its internal hidden dimension (its "width") was **greater than or equal to** the dimension of the RAE's output tokens (e.g., 768 for DINOv2-B).
+    *   If the DiT was too "narrow" (width < token dimension), it failed to reconstruct the image, no matter how "deep" they made the model (i.e., adding more layers didn't help).
+
+*   **Explanation (The "Why"):** The paper gives a theoretical reason for this width requirement.
+    *   The diffusion process works by adding noise. This noise spreads the data across the *entire* high-dimensional latent space. The data no longer lies on a simple, low-dimensional manifold.
+    *   A DiT with a narrow width acts as an information bottleneck. The input and output linear projections of its transformer blocks constrain the model to operate within a lower-dimensional subspace.
+    *   This architectural limitation makes it mathematically impossible for the narrow model to fully represent the data and reverse the noise, leading to high error and poor results. This is formalized in the paper's **Theorem 1**.
+
+*   **Solution:** The straightforward solution is to ensure the DiT's width is scaled to be at least as large as the RAE's token dimension.
 
 **2. Challenge: Standard noise schedules are poorly suited for high dimensions.**
 *   **Finding:** The standard way noise is added during diffusion training was designed for low-dimensional latents. In a high-dimensional RAE space, the same amount of noise corrupts the information less, which impairs training.
