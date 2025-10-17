@@ -44,28 +44,38 @@ An RAE has two key parts:
 
 This design creates a latent space that is both **semantically rich** (thanks to the expert encoder) and optimized for **high-fidelity reconstruction** (thanks to the trained decoder).
 
-Here's how the `RAE` is structured in code. Notice the separation between the `encoder` and `decoder`, and how the training script freezes the encoder's weights.
+Here's how the `RAE` is structured in code. The key idea is simple: combine a frozen pretrained encoder with a trainable decoder.
 
 ```python:src/stage1/rae.py
 class RAE(nn.Module):
     def __init__(self, 
-        # ---- encoder configs ----
-        encoder_cls: str = 'Dinov2withNorm',
-        # ...
-        # ---- decoder configs ----
-        decoder_config_path: str = 'vit_mae-base',
-        # ...
+        # Choose which pretrained vision model to use as the encoder
+        encoder_cls: str = 'Dinov2withNorm',  # e.g., DINOv2, SigLIP, MAE
+        encoder_params: dict = None,           # Model-specific parameters
+        
+        # Configure the decoder architecture
+        decoder_config_path: str = 'vit_mae-base',  # HuggingFace model name
+        latent_dim: int = 768,                      # Must match encoder output
+        base_patches: int = 256,                    # Number of spatial patches (16×16)
     ):
         super().__init__()
-        # 1. The frozen, pretrained encoder (e.g., DINOv2)
-        encoder_cls = ARCHS[encoder_cls]
-        self.encoder: Stage1Protocal = encoder_cls(**encoder_params)
         
-        # ... more encoder setup ...
+        # === PART 1: The frozen, pretrained encoder ===
+        # Load the architecture class from a registry
+        EncoderClass = ARCHS[encoder_cls]
+        # Instantiate with pretrained weights (will be frozen during training)
+        self.encoder = EncoderClass(**(encoder_params or {}))
         
-        # 2. The lightweight, trainable decoder
+        # Store dimensions for later use
+        self.latent_dim = latent_dim          # e.g., 768 for DINOv2-B
+        self.base_patches = base_patches      # 16×16 = 256 spatial locations
+        
+        # === PART 2: The lightweight, trainable decoder ===
+        # Load decoder config from HuggingFace (e.g., ViT-MAE architecture)
         decoder_config = AutoConfig.from_pretrained(decoder_config_path)
+        # Adjust hidden size to match our encoder's output dimension
         decoder_config.hidden_size = self.latent_dim
+        # Create the decoder (this will be trained)
         self.decoder = GeneralDecoder(decoder_config, num_patches=self.base_patches)
 ```
 
@@ -99,18 +109,25 @@ Switching to RAEs isn't a simple drop-in replacement. Their rich, high-dimension
 *   **Explanation (The "Why"):** The paper gives a theoretical reason for this width requirement.
     *   The diffusion process works by adding noise. This noise spreads the data across the *entire* high-dimensional latent space. The data no longer lies on a simple, low-dimensional manifold.
 
-> #### Deep Dive: What is a Manifold? An Analogy
+> #### Deep Dive: The Dimensionality Bottleneck
 >
-> Imagine a giant, empty warehouse (this is your high-dimensional latent space).
+> Every dimension in the rich representataion encoder is important. If the diffusion tranasformer has less dimensiosn, it will lose information and will not be able to reconstruct the image.
 >
-> 1.  **What the Manifold Is:** Now, imagine a single, thin sheet of paper gently curved and floating somewhere in the middle of this warehouse. This sheet of paper is the **low-dimensional manifold**. All "valid" or "meaningful" images, when encoded by the RAE, produce latent vectors that lie somewhere *on* this sheet. A point representing a "dog" is right next to another point representing a slightly different "dog." A random point picked from the vast empty space of the warehouse is just meaningless static. Traditional generative models (like GANs) are good at learning the shape of this paper and generating new points that stay on it.
+> To understand the problem, let's use a simpler analogy with colors.
 >
-> 2.  **How Diffusion Breaks the Manifold:** The diffusion process takes a point on this sheet of paper (a clean image latent) and adds noise. In our analogy, this is like giving the point a random push in any direction—up, down, left, right. After that push, the point is no longer on the paper; it's now floating somewhere in the 3D space of the warehouse. The denoising model's job is to look at this floating point and figure out how to push it back onto the sheet of paper.
+> *   **The Latent Space:** Imagine the entire RGB color space (3 dimensions: Red, Green, Blue). This is our high-dimensional space.
+> *   **The "Manifold" of Valid Data:** Now, imagine our goal is to only generate shades of gray. These "valid" points (where R=G=B) form a straight line — a 1D manifold — running through the 3D color space.
 >
-> 3.  **Why This Matters for the DiT's Width:** A "narrow" DiT is like trying to navigate the whole warehouse while only being able to see in 2D. It creates an *information bottleneck*, making it mathematically impossible to reverse the noise process for points that were pushed far off the original manifold. By making the DiT's width at least as large as the latent space dimension, you give it the ability to "see" and operate in all dimensions of the warehouse, allowing it to guide any noisy point back to its correct spot.
+> 1.  **Noise Pushes Data Off the Manifold:** The diffusion process starts with a pure gray color (on the line) and adds random noise. This is like adding a bit of red and green, pushing the color off the "gray line" into the full 3D space (e.g., creating a muddy brown).
+>
+> 2.  **The Denoising Task:** The DiT's job is to take that muddy brown color and figure out which shade of gray it came from.
+>
+> 3.  **The Bottleneck:** A "narrow" DiT is like trying to solve this problem while being **red-green colorblind**. It can't see the 'R' and 'G' dimensions. It sees the muddy brown and the pure gray as having the same brightness, but it has lost the color information required to correctly "pull" the brown back to the gray line. This is an **information bottleneck**.
+>
+> **The solution:** The DiT's internal "width" or hidden size must be at least as large as the number of dimensions in the latent space (e.g., 768). This ensures has enough dimensions to encode / understand same information and can reverse the noise process accurately.
 
-    *   A DiT with a narrow width acts as an information bottleneck. The input and output linear projections of its transformer blocks constrain the model to operate within a lower-dimensional subspace.
-    *   This architectural limitation makes it mathematically impossible for the narrow model to fully represent the data and reverse the noise, leading to high error and poor results. This is formalized in the paper's **Theorem 1**.
+*   A DiT with a narrow width acts as an information bottleneck. The input and output linear projections of its transformer blocks constrain the model to operate within a lower-dimensional subspace - imagine each number in a vector as a dimension, if DiT has less dimensions it literally has less "storage" to store information.
+*   This architectural limitation makes it mathematically impossible for the narrower model to fully represent the data and reverse the noise, leading to high error and poor results. This is formalized in the paper's **Theorem 1**.
 
 *   **Solution:** The straightforward solution is to ensure the DiT's width is scaled to be at least as large as the RAE's token dimension.
 
@@ -230,64 +247,18 @@ The √48 ≈ 7× scaling compensates for how variance behaves in high dimension
 
 ---
 
-##### Implementation: What Actually Changed in the Code?
+##### Implementation: A Single Parameter Change
 
-**The ONLY difference between our two experiments was this single parameter:**
-
-```python
-# === EXPERIMENT A (Control): Standard schedule ===
-transport_no_shift = create_transport(
-    path_type='Linear',
-    prediction='velocity',
-    loss_weight='velocity',
-    time_dist_type='uniform',
-    time_dist_shift=1.0,  # ← Standard (no adjustment)
-)
-
-# === EXPERIMENT B (Test): Dimension-dependent shift ===
-# First, calculate alpha from dimensions:
-effective_dim = 768 × 256  # Total latent dimension
-base_dim = 4096            # VAE reference point
-alpha = sqrt(48) = 6.93    # Scaling factor
-
-transport_with_shift = create_transport(
-    path_type='Linear',
-    prediction='velocity',
-    loss_weight='velocity',
-    time_dist_type='uniform',
-    time_dist_shift=6.93,  # ← Adjusted for high dimensions
-)
-```
-
-**What `time_dist_shift` actually does:**
-
-When training diffusion models, we sample random noise levels (timesteps) for each training example. The `time_dist_shift` parameter changes the **distribution** of these timesteps:
-
-- **`shift = 1.0` (default):** Most timesteps are evenly distributed between low and high noise
-- **`shift = 6.93`:** The distribution is shifted toward **higher noise levels**
-
-This means with α=6.93, the model sees more training examples with heavy corruption, forcing it to learn better denoising strategies instead of relying on the redundancy of high-dimensional data.
-
----
-
-##### The Bottom Line: One Parameter Change, 14.6% Improvement
-
-Here's literally the only code that changed between our two experiments:
+The key difference was a single parameter, `time_dist_shift`, which alters the distribution of noise levels during training. A higher value shifts the distribution toward higher noise, forcing the model to learn a more robust denoising function. This single change yielded a 14.6% improvement in final loss on our CIFAR-10 test.
 
 ```diff
-  # Experiment A (Control)
+  # In the transport configuration
   transport = create_transport(
       path_type='Linear',
       prediction='velocity',
--     time_dist_shift=1.0,  # Standard schedule
-+     time_dist_shift=6.93, # Dimension-dependent shift
+      time_dist_shift=6.93, # Dimension-dependent shift (Final Loss: 0.9668)
   )
 ```
-
-**Results on 2,000 CIFAR-10 images:**
-- ❌ **Standard schedule** (`shift=1.0`): Loss = 1.1326
-- ✅ **Shifted schedule** (`shift=6.93`): Loss = 0.9668
-- 📈 **Improvement: 14.6%** from changing one line of code
 
 > 💡 **Key Takeaway:** The dimension-dependent noise schedule shift is simple to implement (one parameter), theoretically grounded (scales with √dimension), and empirically validated (14.6% improvement on real data). For high-dimensional RAE latents, this adjustment is essential for effective diffusion training.
 
@@ -377,20 +348,6 @@ We fine-tuned two decoder versions on 500 CIFAR-10 images for 15 epochs to test 
 3. **The tradeoff is worth it:** Small loss on perfect inputs, but better handling of realistic DiT outputs
 
 ![Visual Comparison](experiment_results/decoder_robustness_visual.png)
-
-**How it works:**
-
-```python
-# In src/stage1/rae.py
-def encode(self, x: torch.Tensor) -> torch.Tensor:
-    z = self.encoder(x)
-    
-    if self.training and self.noise_tau > 0:
-        noise_std = self.noise_tau * torch.rand(...)
-        z = z + noise_std * torch.randn_like(z)  # Decoder learns to handle noisy inputs
-    
-    return z
-```
 
 > 💡 **Key Takeaway:** Noise augmentation (`noise_tau = 0.5-0.8`) makes decoders measurably more robust (+0.5-0.9 dB) to the imperfect latents generated by DiT models, with minimal cost on clean inputs. This simple technique is essential for RAE-based generation.
 
